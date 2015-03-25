@@ -1,5 +1,7 @@
 import sys
 import time
+import re
+import os
 from contextlib import contextmanager
 
 import logbook
@@ -8,24 +10,33 @@ import click
 
 from .bootstrapping import requires_env
 
+_SQLITE_RE = re.compile(r"^sqlite:///(.*)$")
+
 
 @click.group()
 def db():
     pass
 
 
-@db.command()
-@requires_env("app")
-def ensure():
+def _create_sqlite():
+    from flask_app.models import db
+    from flask_app.app import app
+    uri = app.config['SQLALCHEMY_DATABASE_URI']
+    path = _SQLITE_RE.search(uri).group(1)
+
+    if os.path.exists(path):
+        logbook.info("{} exists. Not doing anything", path)
+
+    db.create_all()
+    logbook.info("successfully created the tables")
+
+
+def _create_postgres():
     import sqlalchemy
     from flask_app.app import app
+    from flask_app.models import db
 
     uri = app.config['SQLALCHEMY_DATABASE_URI']
-    if 'postgres' not in uri and 'psycopg2' not in uri:
-        logbook.error(
-            "Don't know how to create database - unrecognized connection type: {!r}", uri)
-        sys.exit(-1)
-
     try:
         sqlalchemy.create_engine(uri).connect()
     except sqlalchemy.exc.OperationalError:
@@ -36,8 +47,26 @@ def ensure():
         conn.execute("create database {} with encoding = 'UTF8'".format(db_name))
         conn.close()
         logbook.info("Database {} successfully created on {}.", db_name, uri)
+        db.create_all()
+        logbook.info("successfully created the tables")
     else:
         logbook.info("Database exists. Not doing anything.")
+
+
+@db.command()
+@requires_env("app")
+def ensure():
+    from flask_app.app import app
+
+    uri = app.config['SQLALCHEMY_DATABASE_URI']
+    if 'postgres' in uri or 'psycopg2' in uri:
+        return _create_postgres()
+    elif 'sqlite' in uri:
+        return _create_sqlite()
+    else:
+        logbook.error("Don't know how to create a database of type {}", url)
+        sys.exit(-1)
+
 
 @db.command()
 def wait(num_retries=60, retry_sleep_seconds=1):
